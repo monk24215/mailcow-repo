@@ -1,0 +1,33 @@
+{
+  "name": "mailcow-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for Mailcow administration and mail-server reputation management",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "mailcow-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "selftest": "node scripts/selftest.mjs",
+    "test": "node scripts/parser-test.mjs && node scripts/smoke-test.mjs",
+    "clean": "rm -rf dist"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "axios": "^1.7.9",
+    "ssh2": "^1.16.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ssh2": "^1.15.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
