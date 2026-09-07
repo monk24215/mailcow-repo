@@ -30,8 +30,17 @@
  *                            sets this automatically)
  */
 
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual, webcrypto } from "node:crypto";
 import express, { type Request, type Response } from "express";
+
+// The MCP SDK's HTTP transport expects the WHATWG Web Crypto API on
+// globalThis (globalThis.crypto), which is only a built-in global on
+// Node 20+. Polyfill it from node:crypto's webcrypto on older runtimes
+// (e.g. Node 18, which Railway's build may select) so initialize doesn't
+// fail with "crypto is not defined". No-op wherever it's already global.
+if (!(globalThis as { crypto?: unknown }).crypto) {
+  (globalThis as { crypto?: unknown }).crypto = webcrypto;
+}
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
