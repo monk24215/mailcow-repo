@@ -3,7 +3,15 @@
  * mailcow-mcp-server
  *
  * MCP server for Mailcow administration and mail-server reputation management.
- * Transport: stdio (local). Configuration comes from environment variables:
+ *
+ * Transport is stdio by default (for local/Claude Desktop use). Set
+ * MCP_TRANSPORT=http to instead serve the MCP Streamable HTTP transport over
+ * an authenticated HTTP endpoint (used for the hosted Railway deployment, so
+ * a cloud session can reach this server directly without a device bridge).
+ * Local/stdio behavior is completely unchanged unless MCP_TRANSPORT=http is
+ * explicitly set.
+ *
+ * Configuration comes from environment variables:
  *
  *   MAILCOW_BASE_URL        https://mail.example.com
  *   MAILCOW_API_KEY         read-write API key from Mailcow
@@ -13,10 +21,21 @@
  *   MAIL_SSH_KEY_PATH       path to a private key, or
  *   MAIL_SSH_PASSWORD       password auth
  *   MAIL_SSH_KEY_PASSPHRASE optional passphrase for the key
+ *
+ *   MCP_TRANSPORT            "stdio" (default) or "http"
+ *   MCP_HTTP_TOKEN           required bearer token when MCP_TRANSPORT=http —
+ *                            every request to /mcp must send
+ *                            "Authorization: Bearer <token>"
+ *   PORT                     HTTP port to listen on (default 8080; Railway
+ *                            sets this automatically)
  */
 
+import { randomUUID, timingSafeEqual } from "node:crypto";
+import express, { type Request, type Response } from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { SERVER_NAME, SERVER_VERSION } from "./constants.js";
 import { registerReadTools } from "./tools/mailcow-read.js";
 import { registerWriteTools } from "./tools/mailcow-write.js";
@@ -24,25 +43,145 @@ import { registerShellTools } from "./tools/server-shell.js";
 import { registerReputationTools } from "./tools/reputation.js";
 import { sshConfigured } from "./services/ssh.js";
 
-const server = new McpServer({
-  name: SERVER_NAME,
-  version: SERVER_VERSION,
-});
+/** Build a fresh McpServer instance with every tool family registered. */
+function buildServer(): McpServer {
+  const server = new McpServer({
+    name: SERVER_NAME,
+    version: SERVER_VERSION,
+  });
 
-registerReadTools(server);
-registerWriteTools(server);
-registerShellTools(server);
-registerReputationTools(server);
+  registerReadTools(server);
+  registerWriteTools(server);
+  registerShellTools(server);
+  registerReputationTools(server);
+
+  return server;
+}
+
+function statusLine(transportLabel: string): string {
+  return (
+    `${SERVER_NAME} v${SERVER_VERSION} ready on ${transportLabel} · Mailcow ${process.env.MAILCOW_BASE_URL} · ` +
+    `SSH ${sshConfigured() ? `enabled (${process.env.MAIL_SSH_HOST})` : "disabled"}`
+  );
+}
+
+async function runStdio(): Promise<void> {
+  const server = buildServer();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error(statusLine("stdio"));
+}
+
+/**
+ * Constant-time bearer-token check for the HTTP transport. Every /mcp
+ * request (POST/GET/DELETE) must present "Authorization: Bearer <token>"
+ * matching MCP_HTTP_TOKEN, or it is rejected before touching any tool.
+ */
+function checkAuth(req: Request, res: Response): boolean {
+  const expected = `Bearer ${process.env.MCP_HTTP_TOKEN ?? ""}`;
+  const provided = String(req.headers["authorization"] ?? "");
+  const ok =
+    provided.length === expected.length &&
+    timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+
+  if (!ok) {
+    res.status(401).json({
+      jsonrpc: "2.0",
+      error: { code: -32001, message: "Unauthorized" },
+      id: null,
+    });
+    return false;
+  }
+  return true;
+}
+
+async function runHttp(): Promise<void> {
+  if (!process.env.MCP_HTTP_TOKEN) {
+    console.error(
+      "ERROR: MCP_HTTP_TOKEN is required when MCP_TRANSPORT=http. " +
+        "Set it to a long random secret; clients must send it as " +
+        "'Authorization: Bearer <token>'."
+    );
+    process.exit(1);
+  }
+
+  const app = express();
+  app.use(express.json());
+
+  // Per-session transports, keyed by the MCP session ID issued on
+  // initialize. Each session gets its own McpServer instance so sessions
+  // never share in-memory state with one another.
+  const transports: Record<string, StreamableHTTPServerTransport> = {};
+
+  app.post("/mcp", async (req: Request, res: Response) => {
+    if (!checkAuth(req, res)) return;
+
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    let transport: StreamableHTTPServerTransport;
+
+    if (sessionId && transports[sessionId]) {
+      transport = transports[sessionId];
+    } else if (!sessionId && isInitializeRequest(req.body)) {
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (sid) => {
+          transports[sid] = transport;
+        },
+      });
+      transport.onclose = () => {
+        if (transport.sessionId) delete transports[transport.sessionId];
+      };
+
+      const server = buildServer();
+      await server.connect(transport);
+    } else {
+      res.status(400).json({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Bad Request: no valid session ID provided" },
+        id: null,
+      });
+      return;
+    }
+
+    await transport.handleRequest(req, res, req.body);
+  });
+
+  const handleSessionRequest = async (req: Request, res: Response) => {
+    if (!checkAuth(req, res)) return;
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    if (!sessionId || !transports[sessionId]) {
+      res.status(400).send("Invalid or missing session ID");
+      return;
+    }
+    await transports[sessionId].handleRequest(req, res);
+  };
+
+  app.get("/mcp", handleSessionRequest);
+  app.delete("/mcp", handleSessionRequest);
+
+  // Unauthenticated liveness probe only — no Mailcow data, no session state.
+  app.get("/health", (_req: Request, res: Response) => {
+    res.status(200).send("ok");
+  });
+
+  const port = Number(process.env.PORT) || 8080;
+  app.listen(port, () => {
+    console.error(statusLine(`http :${port}`));
+  });
+}
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
     process.stdout.write(
       `${SERVER_NAME} v${SERVER_VERSION}\n\n` +
-        `An MCP server exposing Mailcow administration and mail reputation analysis over stdio.\n\n` +
+        `An MCP server exposing Mailcow administration and mail reputation analysis\n` +
+        `over stdio (default) or the MCP Streamable HTTP transport (MCP_TRANSPORT=http).\n\n` +
         `Required env: MAILCOW_BASE_URL, MAILCOW_API_KEY\n` +
         `Optional env: MAIL_SSH_HOST, MAIL_SSH_USER, MAIL_SSH_PORT, MAIL_SSH_KEY_PATH,\n` +
-        `              MAIL_SSH_PASSWORD, MAIL_SSH_KEY_PASSPHRASE\n\n` +
-        `Register it in Claude Desktop's config under mcpServers. See README.md.\n`
+        `              MAIL_SSH_PASSWORD, MAIL_SSH_KEY_PASSPHRASE\n` +
+        `HTTP mode env: MCP_TRANSPORT=http, MCP_HTTP_TOKEN (required bearer token), PORT\n\n` +
+        `Register it in Claude Desktop's config under mcpServers for stdio use.\n` +
+        `See README.md.\n`
     );
     return;
   }
@@ -56,12 +195,11 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error(
-    `${SERVER_NAME} v${SERVER_VERSION} ready on stdio · Mailcow ${process.env.MAILCOW_BASE_URL} · ` +
-      `SSH ${sshConfigured() ? `enabled (${process.env.MAIL_SSH_HOST})` : "disabled"}`
-  );
+  if (process.env.MCP_TRANSPORT === "http") {
+    await runHttp();
+  } else {
+    await runStdio();
+  }
 }
 
 main().catch((error) => {
