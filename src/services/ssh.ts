@@ -26,8 +26,21 @@ function connectConfig(): ConnectConfig {
     readyTimeout: 20000,
     keepaliveInterval: 5000,
   };
+  // MAIL_SSH_KEY takes the private key's own PEM/OpenSSH content directly —
+  // for environments like a hosted container where there's no local
+  // filesystem path that makes sense to point at (a key checked out on one
+  // machine and a path baked into another machine's env is exactly how this
+  // broke: MAIL_SSH_KEY_PATH held a Windows path that doesn't exist inside a
+  // Linux container). Checked before MAIL_SSH_KEY_PATH; both may set
+  // MAIL_SSH_KEY_PASSPHRASE.
+  const keyContent = process.env.MAIL_SSH_KEY;
   const keyPath = process.env.MAIL_SSH_KEY_PATH;
-  if (keyPath) {
+  if (keyContent) {
+    cfg.privateKey = keyContent;
+    if (process.env.MAIL_SSH_KEY_PASSPHRASE) {
+      cfg.passphrase = process.env.MAIL_SSH_KEY_PASSPHRASE;
+    }
+  } else if (keyPath) {
     // Windows sets USERPROFILE, not HOME, so ~ must fall back to it or the
     // path never resolves and the failure looks like a missing key file.
     const home = process.env.HOME || process.env.USERPROFILE;
@@ -37,7 +50,8 @@ function connectConfig(): ConnectConfig {
     } catch (err) {
       throw new Error(
         `Cannot read SSH key at ${resolved}: ${err instanceof Error ? err.message : String(err)}. ` +
-          `Use an absolute path in MAIL_SSH_KEY_PATH (in claude_desktop_config.json, escape backslashes: C:\\\\Users\\\\you\\\\.ssh\\\\id_ed25519).`
+          `Use an absolute path in MAIL_SSH_KEY_PATH (in claude_desktop_config.json, escape backslashes: C:\\\\Users\\\\you\\\\.ssh\\\\id_ed25519) ` +
+          `— or set MAIL_SSH_KEY to the key's own content instead of a path (e.g. for a hosted deployment with no relevant local filesystem).`
       );
     }
     if (process.env.MAIL_SSH_KEY_PASSPHRASE) {
@@ -46,7 +60,7 @@ function connectConfig(): ConnectConfig {
   } else if (process.env.MAIL_SSH_PASSWORD) {
     cfg.password = process.env.MAIL_SSH_PASSWORD;
   } else {
-    throw new Error("Set either MAIL_SSH_KEY_PATH or MAIL_SSH_PASSWORD for SSH authentication.");
+    throw new Error("Set MAIL_SSH_KEY, MAIL_SSH_KEY_PATH, or MAIL_SSH_PASSWORD for SSH authentication.");
   }
   return cfg;
 }
@@ -54,7 +68,8 @@ function connectConfig(): ConnectConfig {
 /** True when SSH credentials are configured. */
 export function sshConfigured(): boolean {
   return Boolean(
-    process.env.MAIL_SSH_HOST && (process.env.MAIL_SSH_KEY_PATH || process.env.MAIL_SSH_PASSWORD)
+    process.env.MAIL_SSH_HOST &&
+      (process.env.MAIL_SSH_KEY || process.env.MAIL_SSH_KEY_PATH || process.env.MAIL_SSH_PASSWORD)
   );
 }
 
