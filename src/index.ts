@@ -23,9 +23,15 @@
  *   MAIL_SSH_KEY_PASSPHRASE optional passphrase for the key
  *
  *   MCP_TRANSPORT            "stdio" (default) or "http"
- *   MCP_HTTP_TOKEN           required bearer token when MCP_TRANSPORT=http —
- *                            every request to /mcp must send
- *                            "Authorization: Bearer <token>"
+ *   MCP_HTTP_TOKEN           required shared secret when MCP_TRANSPORT=http.
+ *                            A request is authorized if it either sends
+ *                            "Authorization: Bearer <token>" to /mcp, or is
+ *                            addressed to /mcp/<token>. The header form is
+ *                            preferred; the path form exists so the endpoint
+ *                            can be added through claude.ai's custom-connector
+ *                            dialog, which accepts a URL and offers no place
+ *                            to put a static token. A /mcp/<token> URL is
+ *                            itself a secret — see checkAuth() below.
  *   PORT                     HTTP port to listen on (default 8080; Railway
  *                            sets this automatically)
  */
