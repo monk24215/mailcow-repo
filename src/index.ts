@@ -181,7 +181,7 @@ async function runHttp(): Promise<void> {
     }
 
     await transport.handleRequest(req, res, req.body);
-  });
+  };
 
   const handleSessionRequest = async (req: Request, res: Response) => {
     if (!checkAuth(req, res)) return;
