@@ -150,7 +150,7 @@ async function runHttp(): Promise<void> {
   // never share in-memory state with one another.
   const transports: Record<string, StreamableHTTPServerTransport> = {};
 
-  app.post("/mcp", async (req: Request, res: Response) => {
+  const handleMcpPost = async (req: Request, res: Response) => {
     if (!checkAuth(req, res)) return;
 
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
