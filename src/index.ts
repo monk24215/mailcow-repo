@@ -193,8 +193,18 @@ async function runHttp(): Promise<void> {
     await transports[sessionId].handleRequest(req, res);
   };
 
+  // Two ways in, both behind the same checkAuth():
+  //   /mcp        with "Authorization: Bearer <token>"  — original, preferred
+  //   /mcp/<token>                                      — for the claude.ai
+  //                                                       connector dialog,
+  //                                                       which takes a URL
+  //                                                       and nothing else
+  app.post("/mcp", handleMcpPost);
+  app.post("/mcp/:token", handleMcpPost);
   app.get("/mcp", handleSessionRequest);
+  app.get("/mcp/:token", handleSessionRequest);
   app.delete("/mcp", handleSessionRequest);
+  app.delete("/mcp/:token", handleSessionRequest);
 
   // Unauthenticated liveness probe only — no Mailcow data, no session state.
   app.get("/health", (_req: Request, res: Response) => {
