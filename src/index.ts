@@ -82,16 +82,44 @@ async function runStdio(): Promise<void> {
 }
 
 /**
- * Constant-time bearer-token check for the HTTP transport. Every /mcp
- * request (POST/GET/DELETE) must present "Authorization: Bearer <token>"
- * matching MCP_HTTP_TOKEN, or it is rejected before touching any tool.
+ * Constant-time string comparison. timingSafeEqual throws on unequal
+ * lengths, so guard on length first — that leaks only the length, which an
+ * attacker can vary freely anyway.
+ */
+function safeEqual(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * Auth check for the HTTP transport. A request is authorized if EITHER:
+ *
+ *   - it sends "Authorization: Bearer <token>" matching MCP_HTTP_TOKEN, or
+ *   - it was routed via /mcp/:token and that path segment matches.
+ *
+ * The header form is the original and the preferred one — use it for
+ * scripted/curl clients. The path form exists because claude.ai's
+ * "Add custom connector" dialog accepts only a URL: its one authentication
+ * option is OAuth, which this single-user server deliberately doesn't
+ * implement, so there is nowhere to put a static bearer token. Putting the
+ * token in the path lets the URL carry its own credential.
+ *
+ * Consequence worth being explicit about: a /mcp/<token> URL IS the secret.
+ * It should be treated exactly like the token — not pasted into shared docs,
+ * issues, or chat logs. It will also appear in HTTP access logs at any proxy
+ * that records full request paths (Railway's edge included), which a bearer
+ * header would not. That is the trade for being connectable from the UI.
  */
 function checkAuth(req: Request, res: Response): boolean {
-  const expected = `Bearer ${process.env.MCP_HTTP_TOKEN ?? ""}`;
-  const provided = String(req.headers["authorization"] ?? "");
+  const token = process.env.MCP_HTTP_TOKEN ?? "";
+  const header = String(req.headers["authorization"] ?? "");
+  const pathToken =
+    typeof req.params?.token === "string" ? req.params.token : "";
+
   const ok =
-    provided.length === expected.length &&
-    timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+    safeEqual(header, `Bearer ${token}`) ||
+    (pathToken.length > 0 && safeEqual(pathToken, token));
 
   if (!ok) {
     res.status(401).json({
